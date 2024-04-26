@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -112,6 +116,7 @@ func createUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 }
 
 func getUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+
 	var creds Credentials
 	err := json.NewDecoder(r.Body).Decode(&creds)
 	if err != nil {
@@ -157,6 +162,43 @@ func getUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 
 	// Encode and return the combined user data
 	json.NewEncoder(w).Encode(combinedUser)
+
+	// Generate a token
+	token, err := generateToken(combinedUser)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return the token and user data
+	json.NewEncoder(w).Encode(struct {
+		Token string `json:"token"`
+		User  User   `json:"user"`
+	}{
+		Token: token,
+		User:  combinedUser,
+	})
+}
+
+func generateToken(user User) (string, error) {
+	jwtSecret := os.Getenv("JWT_SECRET")
+	// Create a new token
+	token := jwt.New(jwt.SigningMethodHS256)
+
+	// Set the token claims
+	claims := token.Claims.(jwt.MapClaims)
+	claims["user_id"] = user.ID
+	claims["email"] = user.Email
+	claims["name"] = user.Name
+	claims["exp"] = time.Now().Add(time.Hour * 24).Unix() // Token expires in 24 hours
+
+	// Sign the token with a secret key
+	tokenString, err := token.SignedString([]byte(jwtSecret))
+	if err != nil {
+		return "", err
+	}
+
+	return tokenString, nil
 }
 
 func updateUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
