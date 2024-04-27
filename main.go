@@ -73,6 +73,8 @@ func main() {
 
 	http.HandleFunc("/createUser", createUserHandler(db))
 	http.HandleFunc("/getUser", getUserHandler(db))
+	http.HandleFunc("/deleteUser", deleteUserHandler(db))
+	http.HandleFunc("/updateFavorites", updateFavoritesHandler(db))
 
 	fmt.Println("Server is listening on port 8080...")
 	if err := http.ListenAndServe(":8080", nil); err != nil {

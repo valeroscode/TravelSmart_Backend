@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -201,12 +202,135 @@ func generateToken(user User) (string, error) {
 	return tokenString, nil
 }
 
-func updateUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
-	// Implement user update logic here
+func updateFavorites(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+
+	var requestBody struct {
+		Email     string `json:"email"`
+		Operation string `json:"operation"`
+		Item      string `json:"item"`
+	}
+
+	jsonErr := json.NewDecoder(r.Body).Decode(&requestBody)
+	if jsonErr != nil {
+		http.Error(w, jsonErr.Error(), http.StatusBadRequest)
+		return
+	}
+
+	requestBody.Email = strings.ToLower(requestBody.Email)
+	// Extract the JWT token from the Authorization header
+	authHeader := r.Header.Get("Authorization")
+	jwtToken := strings.TrimPrefix(authHeader, "Bearer ")
+	// Verify the JWT token
+	valid, err := verifyJWT(jwtToken)
+	if !valid {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	var array []string
+	var arrayNull bool
+	err = db.QueryRow("SELECT array, favorites IS NULL FROM users WHERE id = $1", requestBody.Email).Scan(&array, &arrayNull)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if arrayNull {
+		array = []string{} // Initialize an empty slice if the column is null
+	}
+	err = db.QueryRow("SELECT favorites FROM users WHERE email = $1", requestBody.Email).Scan(&array)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	switch requestBody.Operation {
+	case "append":
+		array = append(array, requestBody.Item)
+	case "remove":
+		// Find the index of the item in the array
+		index := -1
+		for i, item := range array {
+			if item == requestBody.Item {
+				index = i
+				break
+			}
+		}
+		if index != -1 {
+			array = append(array[:index], array[index+1:]...)
+		}
+	default:
+		http.Error(w, "Invalid operation", http.StatusBadRequest)
+		return
+	}
+}
+
+func verifyJWT(token string) (bool, error) {
+	jwtSecret := os.Getenv("JWT_SECRET")
+	// Parse the JWT token
+	parsedToken, err := jwt.Parse(token, func(token *jwt.Token) (interface{}, error) {
+		// Check the token's signature
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		// Return the secret key
+		return []byte(jwtSecret), nil
+	})
+	if err != nil {
+		return false, err
+	}
+	// Check if the token is valid
+	if claims, ok := parsedToken.Claims.(jwt.MapClaims); ok && parsedToken.Valid {
+		exp := claims["exp"]
+		if exp != nil {
+			if exp.(float64) < float64(time.Now().Unix()) {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func deleteUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
-	// Implement user deletion logic here
+	var requestBody struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	jsonErr := json.NewDecoder(r.Body).Decode(&requestBody)
+	if jsonErr != nil {
+		http.Error(w, jsonErr.Error(), http.StatusBadRequest)
+		return
+	}
+
+	requestBody.Email = strings.ToLower(requestBody.Email)
+
+	var storedHash string
+
+	quErr := db.QueryRow("SELECT password FROM users WHERE email = $1", requestBody.Email).Scan(&storedHash)
+	if quErr == sql.ErrNoRows {
+		http.Error(w, "Invalid email", http.StatusUnauthorized)
+		return
+	}
+	if quErr != nil {
+		log.Printf("Error retrieving user data: %v", quErr)
+		http.Error(w, "Error retrieving user data", http.StatusInternalServerError)
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(requestBody.Password)); err != nil {
+		http.Error(w, "Invalid password", http.StatusUnauthorized)
+		return
+	}
+
+	db.Exec("DELETE FROM users WHERE email = $1", requestBody.Email)
+
+	json.NewEncoder(w).Encode(struct {
+		Status string `json:"status"`
+		User   string `json:"user"`
+	}{
+		Status: "deleted",
+		User:   requestBody.Email,
+	})
 }
 
 func createUserHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
@@ -220,5 +344,21 @@ func getUserHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Content-Type", "application/json")
 		getUser(w, r, db)
+	}
+}
+
+func deleteUserHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("Content-Type", "application/json")
+		deleteUser(w, r, db)
+	}
+}
+
+func updateFavoritesHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("Content-Type", "application/json")
+		updateFavorites(w, r, db)
 	}
 }
