@@ -24,8 +24,6 @@ type User struct {
 	Trips     Trips     `json:"trips"`
 }
 
-type Trip map[string]tripDetails
-
 type tripDetails struct {
 	City  string              `json:"city"`
 	Dates []string            `json:"dates"`
@@ -33,13 +31,19 @@ type tripDetails struct {
 	Year  int                 `json:"year"`
 }
 
-type Trips map[string]Trip
+type Trips struct {
+	Trips map[string]tripDetails `json:"trips"`
+}
 
 type Days map[string][]string
 
 type Credentials struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+type UserService struct {
+	db         *sql.DB
+	emailIndex int
 }
 
 func createUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
@@ -116,7 +120,7 @@ func createUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	json.NewEncoder(w).Encode(user)
 }
 
-func getUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func (us *UserService) getUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 
 	var creds Credentials
 	err := json.NewDecoder(r.Body).Decode(&creds)
@@ -132,7 +136,8 @@ func getUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	var name string
 	var favorites *[]string
 	var trips json.RawMessage
-	quErr := db.QueryRow("SELECT password, name, favorites, trips FROM users WHERE email = $1", email).Scan(&storedHash, &name, &favorites, &trips)
+	var id int
+	quErr := db.QueryRow("SELECT password, name, favorites, trips, id FROM users WHERE email = $1", email).Scan(&storedHash, &name, &favorites, &trips, &id)
 	if quErr == sql.ErrNoRows {
 		http.Error(w, "Invalid email", http.StatusUnauthorized)
 		return
@@ -147,6 +152,15 @@ func getUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		http.Error(w, "Invalid password", http.StatusUnauthorized)
 		return
 	}
+
+	_, indexErr := us.db.Exec("CREATE INDEX IF NOT EXISTS idx_email ON users (email)")
+	if indexErr != nil {
+		return
+	}
+
+	us.emailIndex = id
+
+	fmt.Println(us.emailIndex)
 
 	var tripData Trips
 	err = json.Unmarshal(trips, &tripData)
@@ -202,8 +216,8 @@ func generateToken(user User) (string, error) {
 	return tokenString, nil
 }
 
-func updateFavorites(w http.ResponseWriter, r *http.Request, db *sql.DB) {
-
+func (us *UserService) updateFavorites(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	fmt.Println(us.emailIndex)
 	var requestBody struct {
 		Email     string `json:"email"`
 		Operation string `json:"operation"`
@@ -230,15 +244,15 @@ func updateFavorites(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	switch requestBody.Operation {
 	case "append":
 		var currentArray sql.NullString
-		err = db.QueryRow("SELECT favorites FROM users WHERE email = $1", requestBody.Email).Scan(&currentArray)
+		err = db.QueryRow("SELECT favorites FROM users WHERE id = $1", us.emailIndex).Scan(&currentArray)
 		if currentArray.Valid {
-			_, err = db.Exec("UPDATE users SET favorites = ARRAY_APPEND(favorites, $1) WHERE email = $2", requestBody.Item, requestBody.Email)
+			_, err = db.Exec("UPDATE users SET favorites = ARRAY_APPEND(favorites, $1) WHERE id = $2", us.emailIndex, requestBody.Email)
 			if err != nil {
 				log.Println(err)
 			}
 		} else {
 			array := []string{requestBody.Item}
-			_, err = db.Exec("UPDATE users SET favorites = $1 WHERE email = $2", pq.Array(array), requestBody.Email)
+			_, err = db.Exec("UPDATE users SET favorites = $1 WHERE id = $2", pq.Array(array), us.emailIndex)
 			if err != nil {
 				log.Println(err)
 			}
@@ -250,7 +264,7 @@ func updateFavorites(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		}
 
 	case "remove":
-		_, err = db.Exec("UPDATE users SET favorites = CASE WHEN favorites IS NULL OR favorites = '{}' THEN '{}' ELSE ARRAY_REMOVE(favorites, $1) END WHERE email = $2", requestBody.Item, requestBody.Email)
+		_, err = db.Exec("UPDATE users SET favorites = CASE WHEN favorites IS NULL OR favorites = '{}' THEN '{}' ELSE ARRAY_REMOVE(favorites, $1) END WHERE id = $2", requestBody.Item, us.emailIndex)
 		if err != nil {
 			log.Println(err)
 		}
@@ -260,8 +274,8 @@ func updateFavorites(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 }
 
-func updateName(w http.ResponseWriter, r *http.Request, db *sql.DB) {
-
+func (us *UserService) updateName(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	fmt.Println(us.emailIndex)
 	var requestBody struct {
 		Email string `json:"email"`
 		Name  string `json:"name"`
@@ -284,7 +298,7 @@ func updateName(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	_, err = db.Exec("UPDATE users SET name = $1 WHERE email = $2", requestBody.Name, requestBody.Email)
+	_, err = db.Exec("UPDATE users SET name = $1 WHERE id = $2", requestBody.Name, us.emailIndex)
 	if err != nil {
 		log.Println(err)
 	}
@@ -318,7 +332,7 @@ func verifyJWT(token string) (bool, error) {
 	return false, nil
 }
 
-func deleteUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func (us *UserService) deleteUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	var requestBody struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
@@ -334,7 +348,7 @@ func deleteUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 
 	var storedHash string
 
-	quErr := db.QueryRow("SELECT password FROM users WHERE email = $1", requestBody.Email).Scan(&storedHash)
+	quErr := db.QueryRow("SELECT password FROM users WHERE id = $1", us.emailIndex).Scan(&storedHash)
 	if quErr == sql.ErrNoRows {
 		http.Error(w, "Invalid email", http.StatusUnauthorized)
 		return
@@ -349,7 +363,7 @@ func deleteUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	db.Exec("DELETE FROM users WHERE email = $1", requestBody.Email)
+	db.Exec("DELETE FROM users WHERE id = $1", us.emailIndex)
 
 	json.NewEncoder(w).Encode(struct {
 		Status string `json:"status"`
@@ -360,7 +374,7 @@ func deleteUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	})
 }
 
-func createTrip(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func (us *UserService) createTrip(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	var requestBody struct {
 		Email string              `json:"email"`
 		Name  string              `json:"name"`
@@ -394,41 +408,52 @@ func createTrip(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		Year:  requestBody.Year,
 	}
 
-	var trips Trip
+	var trips Trips
+	var tempTrips Trips
+	trips.Trips = make(map[string]tripDetails)
 
-	query := "SELECT trips FROM users WHERE email = $1"
+	query := "SELECT trips FROM users WHERE id = $1"
 
-	row := db.QueryRow(query, requestBody.Email)
+	row := db.QueryRow(query, us.emailIndex)
 	var tripsJSON []byte
 	switch err := row.Scan(&tripsJSON); {
 	case err != nil:
 		return
 	case tripsJSON != nil:
-		err = json.Unmarshal(tripsJSON, &trips)
+		err = json.Unmarshal(tripsJSON, &tempTrips)
 		if err != nil {
 			return
 		}
-	}
 
-	trips[requestBody.Name] = trip
+		trips.Trips[requestBody.Name] = trip
+
+		for k, v := range tempTrips.Trips {
+			trips.Trips[k] = v
+		}
+	}
 
 	tripsJSON, err = json.Marshal(trips)
 	if err != nil {
 		return
 	}
-	// Update the user row with the new trip data
-	query = "UPDATE users SET trips = $1 WHERE email = $2"
-	_, err = db.Exec(query, tripsJSON, requestBody.Email)
+
+	//Update the user row with the new trip data
+	query = "UPDATE users SET trips = $1 WHERE id = $2"
+	_, err = db.Exec(query, tripsJSON, us.emailIndex)
 	if err != nil {
 		return
 	}
 }
 
-func updateTripName(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func (us *UserService) updateTripName(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	var requestBody struct {
-		Email   string `json:"email"`
-		Newname string `json:"newname"`
-		Trip    string `json:"tripname"`
+		Email   string              `json:"email"`
+		Newname string              `json:"newname"`
+		Trip    string              `json:"tripname"`
+		City    string              `json:"city"`
+		Year    int                 `json:"year"`
+		Dates   []string            `json:"dates"`
+		Plans   map[string][]string `json:"plans"`
 	}
 
 	jsonErr := json.NewDecoder(r.Body).Decode(&requestBody)
@@ -448,92 +473,119 @@ func updateTripName(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	var trips []Trip
+	var trips Trips
+	var tempTrips Trips
+	trips.Trips = make(map[string]tripDetails)
 
-	query := "SELECT trips FROM users WHERE email = $1"
-	row := db.QueryRow(query, requestBody.Email)
+	query := "SELECT trips FROM users WHERE id = $1"
+	row := db.QueryRow(query, us.emailIndex)
 
 	var tripsJSON []byte
 	switch err := row.Scan(&tripsJSON); {
 	case err != nil:
 		return
 	case tripsJSON != nil:
-		err = json.Unmarshal(tripsJSON, &trips)
+		err = json.Unmarshal(tripsJSON, &tempTrips)
 		if err != nil {
 			return
 		}
-	}
+		tripsCopy := tripDetails{}
+		tripsCopy.City = requestBody.City
+		tripsCopy.Dates = requestBody.Dates
+		tripsCopy.Plans = requestBody.Plans
+		tripsCopy.Year = requestBody.Year
 
-	for i, trip := range trips {
-		if tripName, ok := trip[requestBody.Trip]; ok {
-			trips[i] = Trip{
-				requestBody.Newname: tripName,
-			}
-			break
+		trips.Trips[requestBody.Newname] = tripsCopy
+
+		for k, v := range tempTrips.Trips {
+			trips.Trips[k] = v
 		}
+
+		delete(trips.Trips, requestBody.Trip)
+
 	}
 
 	tripsJSON, err = json.Marshal(trips)
 	if err != nil {
 		return
 	}
-	query = "UPDATE users SET trips = $1 WHERE email = $2"
-	_, err = db.Exec(query, tripsJSON, requestBody.Email)
+
+	query = "UPDATE users SET trips = $1 WHERE id = $2"
+	_, err = db.Exec(query, tripsJSON, us.emailIndex)
 	if err != nil {
 		return
 	}
 }
 
-// func updateTripPlans(w http.ResponseWriter, r *http.Request, db *sql.DB) {
-// 	var requestBody struct {
-// 		Email    string `json:"email"`
-// 		NewPlan  string `json:"newplan"`
-// 		CurrPlan string `json:"currplan"`
-// 	}
+func (us *UserService) updateTrip(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	var requestBody struct {
+		Email string              `json:"email"`
+		Trip  string              `json:"tripname"`
+		City  string              `json:"city"`
+		Year  int                 `json:"year"`
+		Dates []string            `json:"dates"`
+		Plans map[string][]string `json:"plans"`
+	}
 
-// 	jsonErr := json.NewDecoder(r.Body).Decode(&requestBody)
-// 	if jsonErr != nil {
-// 		http.Error(w, jsonErr.Error(), http.StatusBadRequest)
-// 		return
-// 	}
+	jsonErr := json.NewDecoder(r.Body).Decode(&requestBody)
+	if jsonErr != nil {
+		http.Error(w, jsonErr.Error(), http.StatusBadRequest)
+		return
+	}
 
-// 	requestBody.Email = strings.ToLower(requestBody.Email)
-// 	// Extract the JWT token from the Authorization header
-// 	authHeader := r.Header.Get("Authorization")
-// 	jwtToken := strings.TrimPrefix(authHeader, "Bearer ")
-// 	// Verify the JWT token
-// 	valid, err := verifyJWT(jwtToken)
-// 	if !valid {
-// 		http.Error(w, err.Error(), http.StatusUnauthorized)
-// 		return
-// 	}
+	requestBody.Email = strings.ToLower(requestBody.Email)
+	// Extract the JWT token from the Authorization header
+	authHeader := r.Header.Get("Authorization")
+	jwtToken := strings.TrimPrefix(authHeader, "Bearer ")
+	// Verify the JWT token
+	valid, err := verifyJWT(jwtToken)
+	if !valid {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
 
-// 	var trips []Trip
+	var trips Trips
+	var tempTrips Trips
+	trips.Trips = make(map[string]tripDetails)
 
-// 	query := "SELECT trips FROM users WHERE email = $1"
-// 	row := db.QueryRow(query, requestBody.Email)
+	query := "SELECT trips FROM users WHERE id = $1"
+	row := db.QueryRow(query, us.emailIndex)
 
-// 	var tripsJSON []byte
-// 	switch err := row.Scan(&tripsJSON); {
-// 	case err != nil:
-// 		return
-// 	case tripsJSON != nil:
-// 		err = json.Unmarshal(tripsJSON, &trips)
-// 		if err != nil {
-// 			return
-// 		}
-// 	}
+	var tripsJSON []byte
+	switch err := row.Scan(&tripsJSON); {
+	case err != nil:
+		return
+	case tripsJSON != nil:
+		err = json.Unmarshal(tripsJSON, &tempTrips)
+		if err != nil {
+			return
+		}
+		tripsCopy := tripDetails{}
+		tripsCopy.City = requestBody.City
+		tripsCopy.Dates = requestBody.Dates
+		tripsCopy.Plans = requestBody.Plans
+		tripsCopy.Year = requestBody.Year
 
-// 	for i, trip := range trips {
-// 		if tripName, ok := trip[requestBody.]; ok {
-// 			trips[i] = Trip{
-// 				requestBody.NewPlan: tripName,
-// 			}
-// 			break
-// 		}
-// 	}
+		for k, v := range tempTrips.Trips {
+			trips.Trips[k] = v
+		}
 
-// }
+		trips.Trips[requestBody.Trip] = tripsCopy
+
+	}
+
+	tripsJSON, err = json.Marshal(trips)
+	if err != nil {
+		return
+	}
+
+	query = "UPDATE users SET trips = $1 WHERE id = $2"
+	_, err = db.Exec(query, tripsJSON, us.emailIndex)
+	if err != nil {
+		return
+	}
+
+}
 
 func createUserHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -542,49 +594,57 @@ func createUserHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) 
 }
 
 func getUserHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
-
+	us := &UserService{db: db}
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Content-Type", "application/json")
-		getUser(w, r, db)
+		us.getUser(w, r, db)
 	}
 }
 
 func deleteUserHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
-
+	us := &UserService{db: db}
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Content-Type", "application/json")
-		deleteUser(w, r, db)
+		us.deleteUser(w, r, db)
 	}
 }
 
 func updateFavoritesHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
-
+	us := &UserService{db: db}
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Content-Type", "application/json")
-		updateFavorites(w, r, db)
+		us.updateFavorites(w, r, db)
 	}
 }
 
 func updateNameHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
-
+	us := &UserService{db: db}
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Content-Type", "application/json")
-		updateName(w, r, db)
+		us.updateName(w, r, db)
 	}
 }
 
-func updateTripsHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
-
+func createTripHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
+	us := &UserService{db: db}
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Content-Type", "application/json")
-		createTrip(w, r, db)
+		us.createTrip(w, r, db)
 	}
 }
 
 func updateTripNameHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
-
+	us := &UserService{db: db}
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Content-Type", "application/json")
-		updateTripName(w, r, db)
+		us.updateTripName(w, r, db)
+	}
+}
+
+func updateTripHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
+	us := &UserService{db: db}
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("Content-Type", "application/json")
+		us.updateTrip(w, r, db)
 	}
 }
