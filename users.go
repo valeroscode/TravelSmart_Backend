@@ -16,26 +16,26 @@ import (
 )
 
 type User struct {
-	ID        int     `json:"id"`
-	Name      string  `json:"name"`
-	Email     string  `json:"email"`
-	Password  string  `json:"password"`
-	Favorites *string `json:"favorites"`
-	Trips     Trips   `json:"trips"`
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	Email     string    `json:"email"`
+	Password  string    `json:"password"`
+	Favorites *[]string `json:"favorites"`
+	Trips     Trips     `json:"trips"`
 }
 
-type Trip struct {
-	City  string   `json:"city"`
-	Dates []string `json:"dates"`
-	Plans []Plan   `json:"plans"`
-	Year  int      `json:"year"`
+type Trip map[string]tripDetails
+
+type tripDetails struct {
+	City  string              `json:"city"`
+	Dates []string            `json:"dates"`
+	Plans map[string][]string `json:"plans"`
+	Year  int                 `json:"year"`
 }
 
 type Trips map[string]Trip
 
-type Plan struct {
-	Details string `json:"details"`
-}
+type Days map[string][]string
 
 type Credentials struct {
 	Email    string `json:"email"`
@@ -130,7 +130,7 @@ func getUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 
 	var storedHash string
 	var name string
-	var favorites *string
+	var favorites *[]string
 	var trips json.RawMessage
 	quErr := db.QueryRow("SELECT password, name, favorites, trips FROM users WHERE email = $1", email).Scan(&storedHash, &name, &favorites, &trips)
 	if quErr == sql.ErrNoRows {
@@ -227,41 +227,68 @@ func updateFavorites(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	var array []string
-	var arrayNull bool
-	err = db.QueryRow("SELECT array, favorites IS NULL FROM users WHERE id = $1", requestBody.Email).Scan(&array, &arrayNull)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if arrayNull {
-		array = []string{} // Initialize an empty slice if the column is null
-	}
-	err = db.QueryRow("SELECT favorites FROM users WHERE email = $1", requestBody.Email).Scan(&array)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	switch requestBody.Operation {
 	case "append":
-		array = append(array, requestBody.Item)
-	case "remove":
-		// Find the index of the item in the array
-		index := -1
-		for i, item := range array {
-			if item == requestBody.Item {
-				index = i
-				break
+		var currentArray sql.NullString
+		err = db.QueryRow("SELECT favorites FROM users WHERE email = $1", requestBody.Email).Scan(&currentArray)
+		if currentArray.Valid {
+			_, err = db.Exec("UPDATE users SET favorites = ARRAY_APPEND(favorites, $1) WHERE email = $2", requestBody.Item, requestBody.Email)
+			if err != nil {
+				log.Println(err)
 			}
+		} else {
+			array := []string{requestBody.Item}
+			_, err = db.Exec("UPDATE users SET favorites = $1 WHERE email = $2", pq.Array(array), requestBody.Email)
+			if err != nil {
+				log.Println(err)
+			}
+
 		}
-		if index != -1 {
-			array = append(array[:index], array[index+1:]...)
+		if err != nil {
+			fmt.Println("Error fetching array from database:", err)
+			return
+		}
+
+	case "remove":
+		_, err = db.Exec("UPDATE users SET favorites = CASE WHEN favorites IS NULL OR favorites = '{}' THEN '{}' ELSE ARRAY_REMOVE(favorites, $1) END WHERE email = $2", requestBody.Item, requestBody.Email)
+		if err != nil {
+			log.Println(err)
 		}
 	default:
 		http.Error(w, "Invalid operation", http.StatusBadRequest)
 		return
 	}
+}
+
+func updateName(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+
+	var requestBody struct {
+		Email string `json:"email"`
+		Name  string `json:"name"`
+	}
+
+	jsonErr := json.NewDecoder(r.Body).Decode(&requestBody)
+	if jsonErr != nil {
+		http.Error(w, jsonErr.Error(), http.StatusBadRequest)
+		return
+	}
+
+	requestBody.Email = strings.ToLower(requestBody.Email)
+	// Extract the JWT token from the Authorization header
+	authHeader := r.Header.Get("Authorization")
+	jwtToken := strings.TrimPrefix(authHeader, "Bearer ")
+	// Verify the JWT token
+	valid, err := verifyJWT(jwtToken)
+	if !valid {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	_, err = db.Exec("UPDATE users SET name = $1 WHERE email = $2", requestBody.Name, requestBody.Email)
+	if err != nil {
+		log.Println(err)
+	}
+
 }
 
 func verifyJWT(token string) (bool, error) {
@@ -333,6 +360,181 @@ func deleteUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	})
 }
 
+func createTrip(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	var requestBody struct {
+		Email string              `json:"email"`
+		Name  string              `json:"name"`
+		City  string              `json:"city"`
+		Dates []string            `json:"dates"`
+		Plans map[string][]string `json:"plans"`
+		Year  int                 `json:"year"`
+	}
+
+	jsonErr := json.NewDecoder(r.Body).Decode(&requestBody)
+	if jsonErr != nil {
+		http.Error(w, jsonErr.Error(), http.StatusBadRequest)
+		return
+	}
+
+	requestBody.Email = strings.ToLower(requestBody.Email)
+	// Extract the JWT token from the Authorization header
+	authHeader := r.Header.Get("Authorization")
+	jwtToken := strings.TrimPrefix(authHeader, "Bearer ")
+	// Verify the JWT token
+	valid, err := verifyJWT(jwtToken)
+	if !valid {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	trip := tripDetails{
+		City:  requestBody.City,
+		Dates: requestBody.Dates,
+		Plans: requestBody.Plans,
+		Year:  requestBody.Year,
+	}
+
+	var trips Trip
+
+	query := "SELECT trips FROM users WHERE email = $1"
+
+	row := db.QueryRow(query, requestBody.Email)
+	var tripsJSON []byte
+	switch err := row.Scan(&tripsJSON); {
+	case err != nil:
+		return
+	case tripsJSON != nil:
+		err = json.Unmarshal(tripsJSON, &trips)
+		if err != nil {
+			return
+		}
+	}
+
+	trips[requestBody.Name] = trip
+
+	tripsJSON, err = json.Marshal(trips)
+	if err != nil {
+		return
+	}
+	// Update the user row with the new trip data
+	query = "UPDATE users SET trips = $1 WHERE email = $2"
+	_, err = db.Exec(query, tripsJSON, requestBody.Email)
+	if err != nil {
+		return
+	}
+}
+
+func updateTripName(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	var requestBody struct {
+		Email   string `json:"email"`
+		Newname string `json:"newname"`
+		Trip    string `json:"tripname"`
+	}
+
+	jsonErr := json.NewDecoder(r.Body).Decode(&requestBody)
+	if jsonErr != nil {
+		http.Error(w, jsonErr.Error(), http.StatusBadRequest)
+		return
+	}
+
+	requestBody.Email = strings.ToLower(requestBody.Email)
+	// Extract the JWT token from the Authorization header
+	authHeader := r.Header.Get("Authorization")
+	jwtToken := strings.TrimPrefix(authHeader, "Bearer ")
+	// Verify the JWT token
+	valid, err := verifyJWT(jwtToken)
+	if !valid {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	var trips []Trip
+
+	query := "SELECT trips FROM users WHERE email = $1"
+	row := db.QueryRow(query, requestBody.Email)
+
+	var tripsJSON []byte
+	switch err := row.Scan(&tripsJSON); {
+	case err != nil:
+		return
+	case tripsJSON != nil:
+		err = json.Unmarshal(tripsJSON, &trips)
+		if err != nil {
+			return
+		}
+	}
+
+	for i, trip := range trips {
+		if tripName, ok := trip[requestBody.Trip]; ok {
+			trips[i] = Trip{
+				requestBody.Newname: tripName,
+			}
+			break
+		}
+	}
+
+	tripsJSON, err = json.Marshal(trips)
+	if err != nil {
+		return
+	}
+	query = "UPDATE users SET trips = $1 WHERE email = $2"
+	_, err = db.Exec(query, tripsJSON, requestBody.Email)
+	if err != nil {
+		return
+	}
+}
+
+// func updateTripPlans(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+// 	var requestBody struct {
+// 		Email    string `json:"email"`
+// 		NewPlan  string `json:"newplan"`
+// 		CurrPlan string `json:"currplan"`
+// 	}
+
+// 	jsonErr := json.NewDecoder(r.Body).Decode(&requestBody)
+// 	if jsonErr != nil {
+// 		http.Error(w, jsonErr.Error(), http.StatusBadRequest)
+// 		return
+// 	}
+
+// 	requestBody.Email = strings.ToLower(requestBody.Email)
+// 	// Extract the JWT token from the Authorization header
+// 	authHeader := r.Header.Get("Authorization")
+// 	jwtToken := strings.TrimPrefix(authHeader, "Bearer ")
+// 	// Verify the JWT token
+// 	valid, err := verifyJWT(jwtToken)
+// 	if !valid {
+// 		http.Error(w, err.Error(), http.StatusUnauthorized)
+// 		return
+// 	}
+
+// 	var trips []Trip
+
+// 	query := "SELECT trips FROM users WHERE email = $1"
+// 	row := db.QueryRow(query, requestBody.Email)
+
+// 	var tripsJSON []byte
+// 	switch err := row.Scan(&tripsJSON); {
+// 	case err != nil:
+// 		return
+// 	case tripsJSON != nil:
+// 		err = json.Unmarshal(tripsJSON, &trips)
+// 		if err != nil {
+// 			return
+// 		}
+// 	}
+
+// 	for i, trip := range trips {
+// 		if tripName, ok := trip[requestBody.]; ok {
+// 			trips[i] = Trip{
+// 				requestBody.NewPlan: tripName,
+// 			}
+// 			break
+// 		}
+// 	}
+
+// }
+
 func createUserHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		createUser(w, r, db)
@@ -360,5 +562,29 @@ func updateFavoritesHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Requ
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Content-Type", "application/json")
 		updateFavorites(w, r, db)
+	}
+}
+
+func updateNameHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("Content-Type", "application/json")
+		updateName(w, r, db)
+	}
+}
+
+func updateTripsHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("Content-Type", "application/json")
+		createTrip(w, r, db)
+	}
+}
+
+func updateTripNameHandler(db *sql.DB) func(w http.ResponseWriter, r *http.Request) {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("Content-Type", "application/json")
+		updateTripName(w, r, db)
 	}
 }
