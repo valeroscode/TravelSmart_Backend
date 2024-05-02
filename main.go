@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -80,6 +81,20 @@ func main() {
 	http.HandleFunc("/updateTripName", updateTripNameHandler(db))
 	http.HandleFunc("/updateTrip", updateTripHandler(db))
 	http.HandleFunc("/deleteTrip", deleteTripHandler(db))
+
+	reactBuildDir := "../build"
+
+	// Serve the index.html file for all routes except static assets
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Construct the path to the index.html file
+		indexPath := filepath.Join(reactBuildDir, "index.html")
+
+		// Serve the index.html file
+		http.ServeFile(w, r, indexPath)
+	})
+
+	// Serve static assets (e.g., JS, CSS, images)
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(reactBuildDir+"/static"))))
 
 	fmt.Println("Server is listening on port 8080...")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
