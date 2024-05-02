@@ -79,6 +79,7 @@ func main() {
 	http.HandleFunc("/createTrip", createTripHandler(db))
 	http.HandleFunc("/updateTripName", updateTripNameHandler(db))
 	http.HandleFunc("/updateTrip", updateTripHandler(db))
+	http.HandleFunc("/deleteTrip", deleteTripHandler(db))
 
 	fmt.Println("Server is listening on port 8080...")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
